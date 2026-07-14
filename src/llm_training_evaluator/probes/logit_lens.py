@@ -24,7 +24,6 @@ def position_indices(
     mode: str,
     configured: list[int],
 ) -> list[int]:
-    sequence_length = input_ids.shape[1]
     valid_length = int(attention_mask[0].sum().item())
     if mode == "last":
         return [max(valid_length - 1, 0)]
