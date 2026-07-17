@@ -19,6 +19,14 @@ class TokenSimilarityProbe:
         weight = getattr(embedding_module, "weight", None)
         if weight is None or not isinstance(weight, Tensor):
             raise TypeError("Input embedding module does not expose a tensor weight")
+        if weight.device.type == "meta":
+            hook = getattr(embedding_module, "_hf_hook", None)
+            weights_map = getattr(hook, "weights_map", None)
+            if weights_map is None:
+                raise RuntimeError(
+                    "Input embeddings are offloaded but their Accelerate weight map is unavailable"
+                )
+            weight = weights_map["weight"]
 
         unique_ids = list(dict.fromkeys(int(value) for value in input_ids.flatten().tolist()))
         query_ids = torch.tensor(unique_ids, device=weight.device, dtype=torch.long)
