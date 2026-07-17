@@ -12,9 +12,11 @@ from ..schemas import LayerPrediction, TokenScore
 
 def module_device(module: nn.Module) -> torch.device:
     for parameter in module.parameters():
-        return parameter.device
+        if parameter.device.type != "meta":
+            return parameter.device
     for buffer in module.buffers():
-        return buffer.device
+        if buffer.device.type != "meta":
+            return buffer.device
     return torch.device("cpu")
 
 
