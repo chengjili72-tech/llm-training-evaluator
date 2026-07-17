@@ -12,13 +12,16 @@ dependencies = [
   "accelerate>=0.30",
   "safetensors>=0.4",
   "torch>=2.2",
-  "transformers>=4.48",
+  "transformers>=4.48,<5",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8",
   "ruff>=0.6",
+]
+cuda-low-memory = [
+  "bitsandbytes>=0.43",
 ]
 
 [project.scripts]
@@ -33,4 +36,3 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-
