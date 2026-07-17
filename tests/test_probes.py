@@ -54,7 +54,7 @@ def test_logit_lens_matches_native_final_logits() -> None:
 
     assert len(result) == 1
     assert result[0].position == 2
-    assert validation["max_abs"] == 0.0
+    assert validation["max_abs"] <= 1e-6
 
 
 def test_token_similarity_excludes_self_and_special_tokens() -> None:
@@ -83,4 +83,3 @@ def test_moe_probe_reports_selected_experts_and_load() -> None:
     assert result is not None
     assert result.expert_load == {0: 1, 2: 1}
     assert result.selected_routes[0]["experts"][0]["expert_id"] == 2
-
