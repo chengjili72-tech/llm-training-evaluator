@@ -5,6 +5,7 @@ from typing import Literal
 
 
 PositionMode = Literal["last", "all", "selected"]
+QuantizationMode = Literal["auto", "none", "4bit", "8bit"]
 
 
 @dataclass(slots=True)
@@ -12,7 +13,12 @@ class ModelConfig:
     path: str
     revision: str | None = None
     dtype: Literal["auto", "float32", "float16", "bfloat16"] = "auto"
+    device: str = "auto"
     device_map: str | None = "auto"
+    quantization: QuantizationMode = "auto"
+    accelerator_memory: str | None = None
+    cpu_memory: str | None = None
+    offload_folder: str = "~/.cache/llm-training-evaluator/offload"
     trust_remote_code: bool = False
 
 
