@@ -66,9 +66,12 @@ def test_single_model_report_prioritizes_core_metrics(tmp_path) -> None:
                         "expert_load": {0: 2, 1: 1},
                         "selected_routes": [
                             {
-                                "token_position": 3,
-                                "experts": [0, 1],
-                                "weights": [0.75, 0.25],
+                                "position": 3,
+                                "token": "分析",
+                                "experts": [
+                                    {"expert_id": 0, "probability": 0.75, "rank": 1},
+                                    {"expert_id": 1, "probability": 0.25, "rank": 2},
+                                ],
                             }
                         ],
                     }
@@ -99,9 +102,9 @@ def test_comparison_report_surfaces_hotspots_and_drift(tmp_path) -> None:
         "metadata": {"model_a": "demo/model-a", "model_b": "demo/model-b"},
         "summary": {
             "top1_agreement": 0.5,
-            "mean_topk_overlap": 0.62,
-            "mean_probability_l1": 0.14,
-            "mean_expert_load_tv": 0.08,
+            "mean_top_k_overlap": 0.62,
+            "mean_top_k_probability_l1": 0.14,
+            "mean_expert_load_total_variation": 0.08,
         },
         "samples": [
             {
@@ -110,26 +113,33 @@ def test_comparison_report_surfaces_hotspots_and_drift(tmp_path) -> None:
                 "layer_comparisons": [
                     {
                         "layer": 0,
-                        "top1_a": "答案",
-                        "top1_b": "答案",
-                        "top1_same": True,
-                        "topk_overlap": 0.8,
-                        "probability_l1": 0.04,
+                        "position": 3,
+                        "model_a_top1": {"text": "答案"},
+                        "model_b_top1": {"text": "答案"},
+                        "top1_agreement": True,
+                        "top_k_overlap": 0.8,
+                        "top_k_jaccard": 0.67,
+                        "top_k_probability_l1": 0.04,
+                        "entropy_delta": 0.01,
                     },
                     {
                         "layer": 1,
-                        "top1_a": "答案",
-                        "top1_b": "拒绝",
-                        "top1_same": False,
-                        "topk_overlap": 0.3,
-                        "probability_l1": 0.24,
+                        "position": 3,
+                        "model_a_top1": {"text": "答案"},
+                        "model_b_top1": {"text": "拒绝"},
+                        "top1_agreement": False,
+                        "top_k_overlap": 0.3,
+                        "top_k_jaccard": 0.18,
+                        "top_k_probability_l1": 0.24,
+                        "entropy_delta": -0.12,
                     },
                 ],
                 "moe_comparisons": [
                     {
                         "layer": 1,
-                        "module": "model.layers.1.mlp.gate",
-                        "expert_load_tv": 0.08,
+                        "model_a_module": "model.layers.1.mlp.gate",
+                        "selected_expert_overlap": 0.72,
+                        "expert_load_total_variation": 0.08,
                         "routing_entropy_delta": -0.03,
                     }
                 ],
@@ -142,9 +152,9 @@ def test_comparison_report_surfaces_hotspots_and_drift(tmp_path) -> None:
 
     assert "双权重逐层对比" in report
     assert "差异热点" in report
-    assert "Top-K 重叠率" in report
+    assert "逐层 Top-K 重合率" in report
     assert "概率 L1 漂移" in report
-    assert "MoE 路由差异" in report
+    assert "MoE 路由漂移" in report
     assert "demo/model-a" in report
     assert "demo/model-b" in report
     assert "变化" in report
