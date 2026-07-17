@@ -39,7 +39,12 @@ def _model_config(path: str, args: argparse.Namespace) -> ModelConfig:
         path=path,
         revision=args.revision,
         dtype=args.dtype,
+        device=args.device,
         device_map=None if args.device_map.lower() == "none" else args.device_map,
+        quantization=args.quantization,
+        accelerator_memory=args.accelerator_memory,
+        cpu_memory=args.cpu_memory,
+        offload_folder=args.offload_dir,
         trust_remote_code=args.trust_remote_code,
     )
 
@@ -49,7 +54,28 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--dtype", choices=("auto", "float32", "float16", "bfloat16"), default="auto"
     )
+    parser.add_argument(
+        "--device",
+        default="auto",
+        help="Execution device: auto, cpu, cuda[:index], or npu[:index] (default: auto)",
+    )
     parser.add_argument("--device-map", default="auto")
+    parser.add_argument(
+        "--quantization",
+        choices=("auto", "none", "4bit", "8bit"),
+        default="auto",
+        help="CUDA weight quantization; auto selects 4-bit below 16 GiB when available",
+    )
+    parser.add_argument(
+        "--accelerator-memory",
+        help="Accelerator memory budget for Accelerate, for example 6GiB",
+    )
+    parser.add_argument("--cpu-memory", help="CPU offload memory budget, for example 48GiB")
+    parser.add_argument(
+        "--offload-dir",
+        default="~/.cache/llm-training-evaluator/offload",
+        help="NVMe/disk offload directory used by low-memory CUDA loading",
+    )
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--similarity-top-k", type=int, default=10)
@@ -68,6 +94,17 @@ def _release_accelerator_memory() -> None:
     npu = getattr(torch, "npu", None)
     if npu is not None and npu.is_available():
         npu.empty_cache()
+
+
+def _print_runtime(result: dict) -> None:
+    runtime = result.get("metadata", {}).get("runtime", {})
+    print(
+        "Runtime: "
+        f"backend={runtime.get('backend', 'unknown')} "
+        f"device={runtime.get('execution_device', 'unknown')} "
+        f"quantization={runtime.get('quantization', 'unknown')} "
+        f"low_memory={runtime.get('low_memory', False)}"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -106,6 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "analyze":
         samples = load_samples(args.samples)
         result = Evaluator(_model_config(args.model, args), _analysis_config(args)).run(samples)
+        _print_runtime(result)
         write_json(args.output, result)
         html_path = args.html or str(Path(args.output).with_suffix(".html"))
         write_html_report(result, html_path)
@@ -118,9 +156,11 @@ def main(argv: list[str] | None = None) -> int:
         config = _analysis_config(args)
         output_dir = Path(args.output_dir)
         model_a = Evaluator(_model_config(args.model_a, args), config).run(samples)
+        _print_runtime(model_a)
         write_json(output_dir / "model_a.json", model_a)
         _release_accelerator_memory()
         model_b = Evaluator(_model_config(args.model_b, args), config).run(samples)
+        _print_runtime(model_b)
         write_json(output_dir / "model_b.json", model_b)
         comparison = compare_analyses(model_a, model_b)
         write_json(output_dir / "comparison.json", comparison)

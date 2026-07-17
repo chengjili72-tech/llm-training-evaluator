@@ -19,7 +19,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[dev]" --no-deps
-          pip install accelerate safetensors transformers pytest ruff
+          pip install accelerate safetensors "transformers<5" pytest ruff
       - name: Run unit tests
         run: |
           ruff check src tests scripts
@@ -55,4 +55,3 @@ jobs:
           name: cloud-demo-results
           path: outputs/
           if-no-files-found: error
-

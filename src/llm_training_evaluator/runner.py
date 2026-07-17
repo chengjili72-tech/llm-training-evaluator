@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import warnings
 from contextlib import ExitStack
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -14,6 +16,7 @@ from .adapters import GenericDecoderAdapter
 from .config import AnalysisConfig, ModelConfig
 from .probes import LogitLensProbe, MoeRoutingProbe, TokenSimilarityProbe
 from .probes.logit_lens import module_device
+from .runtime import resolve_runtime
 from .schemas import Sample, to_dict
 
 
@@ -34,6 +37,7 @@ class Evaluator:
         analysis_config.validate()
         self.model_config = model_config
         self.analysis_config = analysis_config
+        self.runtime_plan = resolve_runtime(model_config)
 
     def run(self, samples: list[Sample]) -> dict[str, Any]:
         tokenizer, model = self._load()
@@ -49,6 +53,8 @@ class Evaluator:
         for sample in samples:
             encoded = tokenizer(sample.prompt, return_tensors="pt")
             input_device = module_device(adapter.input_embeddings())
+            if input_device.type == "meta":
+                input_device = torch.device(self.runtime_plan.execution_device)
             input_ids = encoded["input_ids"].to(input_device)
             attention_mask = encoded.get("attention_mask", torch.ones_like(input_ids)).to(input_device)
             if input_ids.shape[0] != 1:
@@ -145,6 +151,11 @@ class Evaluator:
             "router_modules": [
                 {"layer": router.layer, "name": router.name} for router in router_modules
             ],
+            "runtime": self.runtime_plan.to_dict(),
+            "hf_device_map": {
+                key: str(value) for key, value in getattr(model, "hf_device_map", {}).items()
+            },
+            "accelerator_memory": self._accelerator_memory(),
         }
         return {"metadata": metadata, "samples": sample_results}
 
@@ -157,16 +168,71 @@ class Evaluator:
         if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        model_kwargs = dict(common)
+        model_kwargs: dict[str, Any] = dict(common)
+        model_kwargs["low_cpu_mem_usage"] = True
         if self.model_config.dtype != "auto":
             model_kwargs["torch_dtype"] = DTYPES[self.model_config.dtype]
         else:
             model_kwargs["torch_dtype"] = "auto"
-        if self.model_config.device_map is not None:
-            model_kwargs["device_map"] = self.model_config.device_map
+        plan = self.runtime_plan
+        if plan.device_map is not None:
+            model_kwargs["device_map"] = plan.device_map
+        if plan.max_memory is not None:
+            model_kwargs["max_memory"] = plan.max_memory
+        if plan.offload_folder is not None and plan.device_map is not None:
+            Path(plan.offload_folder).mkdir(parents=True, exist_ok=True)
+            model_kwargs.update(
+                offload_folder=plan.offload_folder,
+                offload_state_dict=True,
+                offload_buffers=True,
+            )
+        if plan.quantization in {"4bit", "8bit"}:
+            from transformers import BitsAndBytesConfig
+
+            compute_dtype = torch.bfloat16
+            if plan.backend == "cuda" and not torch.cuda.is_bf16_supported():
+                compute_dtype = torch.float16
+            model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=plan.quantization == "4bit",
+                load_in_8bit=plan.quantization == "8bit",
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=compute_dtype,
+                bnb_4bit_use_double_quant=True,
+                llm_int8_enable_fp32_cpu_offload=True,
+            )
+        for note in plan.notes:
+            warnings.warn(note, stacklevel=2)
         model = AutoModelForCausalLM.from_pretrained(self.model_config.path, **model_kwargs)
+        if plan.device_map is None and plan.backend in {"cuda", "npu"}:
+            model = model.to(plan.execution_device)
         model.eval()
         return tokenizer, model
+
+    def _accelerator_memory(self) -> dict[str, int] | None:
+        plan = self.runtime_plan
+        if plan.backend == "cuda":
+            index = int(plan.execution_device.split(":", 1)[1])
+            try:
+                return {
+                    "allocated_bytes": int(torch.cuda.memory_allocated(index)),
+                    "reserved_bytes": int(torch.cuda.memory_reserved(index)),
+                    "max_allocated_bytes": int(torch.cuda.max_memory_allocated(index)),
+                }
+            except RuntimeError:
+                return None
+        if plan.backend == "npu":
+            npu = getattr(torch, "npu", None)
+            if npu is not None:
+                index = int(plan.execution_device.split(":", 1)[1])
+                try:
+                    return {
+                        "allocated_bytes": int(npu.memory_allocated(index)),
+                        "reserved_bytes": int(npu.memory_reserved(index)),
+                        "max_allocated_bytes": int(npu.max_memory_allocated(index)),
+                    }
+                except (AttributeError, RuntimeError):
+                    return None
+        return None
 
     def _moe_top_k(self, model: Any) -> int:
         if self.analysis_config.moe_top_k is not None:
@@ -232,4 +298,3 @@ class Evaluator:
                 destination.append(result)
 
         return hook
-
