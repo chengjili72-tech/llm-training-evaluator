@@ -530,10 +530,15 @@ def _hotspots(payload: dict[str, Any]) -> str:
     body = []
     for item in rows:
         changed = not item.get("top1_agreement", False)
+        status = (
+            '<span class="badge bad">变化</span>'
+            if changed
+            else '<span class="badge good">一致</span>'
+        )
         body.append(
             f"<tr class='{'hotspot' if changed else ''}'><td>{_esc(item['sample_id'])}</td>"
             f"<td class='layer-cell'>L{int(item['layer']):02d}</td><td>{item['position']}</td>"
-            f"<td>{'<span class=\"badge bad\">变化</span>' if changed else '<span class=\"badge good\">一致</span>'}</td>"
+            f"<td>{status}</td>"
             f"<td>{_esc(item['model_a_top1'].get('text'))} → {_esc(item['model_b_top1'].get('text'))}</td>"
             f"<td>{_num(item.get('top_k_overlap'),4)}</td><td>{_num(item.get('top_k_probability_l1'),6)}</td></tr>"
         )
