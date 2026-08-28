@@ -152,9 +152,20 @@ details.block[open] > summary::after { content: "−"; }
 .similarity-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 9px; margin-top: 10px; }
 .similarity-row { border: 1px solid var(--border); background: var(--surface-2); border-radius: 10px; padding: 10px; }
 .query-token { display: block; margin-bottom: 6px; font-weight: 800; color: var(--teal); }
-.expert-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 10px; }
-.expert-card { border: 1px solid var(--border); border-radius: 11px; padding: 11px; background: var(--surface-2); }
-.expert-row { display: grid; grid-template-columns: 52px 1fr 30px; align-items: center; gap: 7px; margin: 6px 0; font-size: 11px; }
+.expert-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,280px),1fr)); gap: 10px; }
+.expert-card { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 11px;
+  padding: 11px; background: var(--surface-2); }
+.expert-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.expert-module { overflow-wrap: anywhere; word-break: break-word; }
+.expert-row { display: grid; grid-template-columns: 44px minmax(0,1fr) 34px; align-items: center;
+  gap: 7px; margin: 7px 0; font-size: 11px; }
+.expert-meter { min-width: 0; }
+.expert-row .bar { width: 100%; }
+.expert-count { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+.route-list { display: grid; gap: 7px; margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--border); }
+.route-row { display: grid; grid-template-columns: minmax(92px,auto) minmax(0,1fr); align-items: start; gap: 7px; }
+.route-token { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+.route-experts { min-width: 0; overflow-wrap: anywhere; }
 .strip { display: flex; gap: 4px; flex-wrap: wrap; }
 .layer-dot { min-width: 27px; height: 27px; display: inline-grid; place-items: center; border-radius: 7px;
   font-size: 10px; font-weight: 800; background: var(--good-soft); color: var(--good); }
@@ -168,7 +179,9 @@ footer { padding: 18px 0 36px; color: var(--muted); text-align: center; font-siz
 @media (max-width: 980px) { .metrics { grid-template-columns: repeat(2,minmax(0,1fr)); } .charts { grid-template-columns: 1fr; } }
 @media (max-width: 650px) { .shell { width: min(100% - 20px,1480px); } .hero-row { display:block; }
   .hero-row .status-badge { margin-top: 14px; } .metrics { grid-template-columns: 1fr; }
-  .sample-head { display:block; } .similarity-grid { grid-template-columns: 1fr; } .sample-body { padding: 14px; } }
+  .sample-head { display:block; } .similarity-grid { grid-template-columns: 1fr; }
+  .route-row { grid-template-columns: 1fr; } .route-token { max-width: 100%; }
+  .sample-body { padding: 14px; } }
 @media print { body { background:white; } .toolbar,.theme-button { display:none; } .sample-card,.panel,.metric { box-shadow:none; break-inside:avoid; } }
 """
 
@@ -416,7 +429,10 @@ def _moe_analysis(sample: dict[str, Any]) -> str:
         ordered = sorted(load.items(), key=lambda item: (-item[1], item[0]))
         maximum = max(load.values(), default=1)
         expert_rows = "".join(
-            f"<div class='expert-row'><b>E{expert}</b>{_bar(count,maximum,'good')}<span>{count}</span></div>"
+            "<div class='expert-row'>"
+            f"<b>E{expert}</b><div class='expert-meter'><div class='bar good'>"
+            f"<span style='width:{100.0 * count / max(maximum, 1):.2f}%'></span></div></div>"
+            f"<span class='expert-count'>{count}</span></div>"
             for expert, count in ordered[:12]
         )
         routes = []
@@ -431,15 +447,20 @@ def _moe_analysis(sample: dict[str, Any]) -> str:
                 for expert in route.get("experts", [])
             ]
             routes.append(
-                f"<div><span class='badge neutral'>P{route.get('position')} {_esc(route.get('token'))}</span>"
+                "<div class='route-row'>"
+                f"<span class='badge neutral route-token' title='position={_esc(route.get('position'))}'>"
+                f"P{_esc(route.get('position'))} {_esc(route.get('token'))}</span>"
+                "<div class='route-experts'>"
                 + _tokens(route_tokens)
-                + "</div>"
+                + "</div></div>"
             )
         cards.append(
-            "<div class='expert-card'>"
-            f"<b>Layer {result.get('layer')}</b> · <span class='good'>路由熵 {_num(result.get('routing_entropy'),4)}</span>"
-            f"<div class='panel-subtitle'>{_esc(result.get('module'))}</div>{expert_rows}"
-            + "".join(routes)
+            "<div class='expert-card'><div class='expert-card-head'>"
+            f"<b>Layer {result.get('layer')}</b>"
+            f"<span class='good'>路由熵 {_num(result.get('routing_entropy'),4)}</span></div>"
+            f"<div class='panel-subtitle expert-module' title='{_esc(result.get('module'))}'>"
+            f"{_esc(result.get('module'))}</div>{expert_rows}"
+            + ("<div class='route-list'>" + "".join(routes) + "</div>" if routes else "")
             + "</div>"
         )
     return (
