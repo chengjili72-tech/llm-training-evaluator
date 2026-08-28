@@ -91,6 +91,13 @@ def test_single_model_report_prioritizes_core_metrics(tmp_path) -> None:
     assert "完整 Top-K" in report
     assert "Token Embedding 相似度" in report
     assert "MoE 专家路由" in report
+    assert "expert-meter" in report
+    assert "expert-count" in report
+    assert "route-list" in report
+    assert "route-row" in report
+    assert "grid-template-columns: 44px minmax(0,1fr) 34px" in report
+    assert "<div class='expert-row'><b>E0</b><div class='expert-meter'>" in report
+    assert "<span class='expert-count'>2</span>" in report
     assert "chart-svg" in report
     assert "&lt;unsafe&gt;" in report
     assert "<unsafe>" not in report
