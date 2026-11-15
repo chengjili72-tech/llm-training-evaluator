@@ -1,7 +1,38 @@
 # LLM Training Evaluator
 
+[简体中文](README.zh-CN.md) · [Methods and references](docs/METHODOLOGY.md) · [Validation](docs/VALIDATION.md)
+
 Inspect how a Hugging Face causal language model's token predictions evolve layer by layer,
 find embedding-nearest tokens, inspect MoE expert routing, and compare two trained checkpoints.
+
+## Version 0.2: native likelihood and reproducible research reports
+
+Targets are now scored with teacher forcing using native full-vocabulary probabilities:
+conditional NLL/perplexity, token accuracy/rank/MRR, multiclass Brier, entropy and ECE.
+Offline reports add reliability diagrams, loss heatmaps, tag slices and token CSVs.
+Checkpoint comparisons include sample-paired bootstrap 95% intervals for token-weighted NLL
+changes; they reject mismatched sample sets, targets, tokenization or scoring protocols.
+Layer diagnostics add exact full-vocabulary adjacent-layer JS and descriptive prediction depth.
+Each token position has its own trajectory chart. Optional aligned hidden-state export enables
+linear CKA across checkpoints (`--include-hidden-states --position-mode all`), with explicit
+observation budgets and finite-sample caveats.
+
+```bash
+llm-training-evaluator analyze --model /path/to/hf_checkpoint \
+  --samples examples/samples.jsonl --output outputs/model.json \
+  --device npu:0 --dtype bfloat16 --attn-implementation eager \
+  --max-length 2048 --scoring-stride 512
+
+# Architecture-independent native target scoring (no layer probes)
+llm-training-evaluator analyze --model /path/to/hf_checkpoint \
+  --samples examples/samples.jsonl --output outputs/native.json --native-only
+```
+
+Outputs include HTML, JSON, `.tokens.csv` and `.layers.csv`. Comparisons also produce
+`.target_deltas.csv`. Statistical intervals resample whole independent samples, not tokens;
+one sample receives no interval. These are conditional likelihood diagnostics, not generated
+answer quality or an academic benchmark without a representative evaluation dataset.
+See [methodology](docs/METHODOLOGY.md) for formulas, references and limitations.
 
 ## What it measures
 
@@ -18,8 +49,15 @@ logits. This prevents plausible-looking but incorrectly decoded intermediate pre
 
 ## Current scope
 
-V1 targets decoder-only `AutoModelForCausalLM` checkpoints in standard Hugging Face format.
-Common Llama/Qwen/Mistral/DeepSeek-style module layouts are detected automatically. Models with
+The evaluator targets decoder-only `AutoModelForCausalLM` checkpoints in standard Hugging Face format.
+An offline 24-family architecture matrix covers Llama, Qwen2/3 and MoE variants,
+Mistral/Mixtral, Gemma/Gemma2, Phi/Phi3, OLMo/OLMo2, StarCoder2, StableLM, Granite,
+Cohere, GPT-2/GPT-J/GPT-NeoX, OPT, BLOOM, Falcon and MPT. Readout replay handles OPT
+output projections, Gemma2 softcapping and Cohere/Granite scaling. DeepSeek-style layouts
+remain supported through trusted custom code or upstream implementations.
+HF format alone does not guarantee executability: architecture code, tokenizer files,
+compatible dependencies, device operators and sufficient memory are still required.
+Use `--layers-path` / `--norm-path` for custom layouts, or `--native-only` for target scoring. Models with
 custom layer paths, additional output transforms, or nonstandard router outputs need a small
 adapter under `src/llm_training_evaluator/adapters/`.
 
@@ -54,9 +92,13 @@ Samples use JSON Lines. `id` is optional; `prompt` is required.
 {"id":"math_001","prompt":"1 + 1 =","target":"2","tags":["math"]}
 ```
 
-`target` is retained in the result schema. Supervised target probability, rank, NLL, and
-perplexity metrics are planned for the next milestone; current V1 focuses on the requested
-layer trajectory and checkpoint-difference analysis.
+`target` is optional. Present, nonempty targets are scored; prompt and padding are excluded
+from loss denominators. Joint tokenization uses character offsets. Boundary-spanning merges
+or tokenizers without offsets use separate encoding, explicitly recorded in each result.
+No chat template or EOS is added implicitly. Empty targets are recorded and excluded.
+`--max-length` and `--scoring-stride` define the sliding context protocol; stride=1 maximizes
+left context within the window, at greater computation cost. Context limits declared by the
+model are respected. Use `--native-only` for prompts longer than the layer-probe context limit.
 
 ## Analyze one checkpoint
 
@@ -147,7 +189,7 @@ llm-training-evaluator compare \
   --output-dir outputs/comparison
 ```
 
-Models must use the same architecture depth and tokenizer vocabulary. Each model is loaded and
+Models must use the same architecture type/depth, tokenizer configuration, samples and scoring protocol. Each model is loaded and
 evaluated sequentially, so both full checkpoints do not need to fit in accelerator memory at the
 same time.
 
@@ -171,4 +213,10 @@ silently producing incorrect expert IDs.
 - Static embedding neighbors are not contextual synonyms and tokenizer fragments may look odd.
 - Without labeled targets, the tool measures behavior and representation drift; it cannot by
   itself prove that one checkpoint has better task quality.
-- Exact full-vocabulary JS divergence and Tuned Lens support are planned extensions.
+- Adjacent-layer JS uses the full vocabulary. Cross-checkpoint Top-K union L1 remains a
+  truncated diagnostic, not full-vocabulary divergence. Tuned Lens training is not implemented.
+- ECE depends on binning and sample size. Token calibration is not answer-level calibration.
+- Bootstrap intervals describe sample uncertainty, not training-seed uncertainty. Slices are
+  not adjusted for multiple comparisons.
+- Transformers 4.57.x is the supported dependency line; arbitrary Transformers 5 or
+  custom architecture compatibility is not claimed without testing.

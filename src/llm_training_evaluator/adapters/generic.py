@@ -14,6 +14,10 @@ LAYER_PATHS = (
     "model.layers",
     "model.decoder.layers",
     "transformer.h",
+    "transformer.blocks",
+    "model.transformer.blocks",
+    "transformer.layers",
+    "model.decoder.block",
     "gpt_neox.layers",
     "language_model.model.layers",
     "language_model.layers",
@@ -24,6 +28,11 @@ NORM_PATHS = (
     "model.norm",
     "model.decoder.final_layer_norm",
     "transformer.ln_f",
+    "transformer.norm_f",
+    "model.transformer.norm_f",
+    "transformer.norm",
+    "model.final_layernorm",
+    "model.final_layer_norm",
     "gpt_neox.final_layer_norm",
     "language_model.model.norm",
     "language_model.norm",
@@ -45,6 +54,12 @@ class GenericDecoderAdapter(ModelAdapter):
     final normalization, or router outputs do not follow the common conventions.
     """
 
+    def __init__(self, model: nn.Module, layers_path: str | None = None,
+                 norm_path: str | None = None) -> None:
+        super().__init__(model)
+        self.layers_path = layers_path
+        self.norm_path = norm_path
+
     def _first_path(self, candidates: tuple[str, ...], kind: str) -> Any:
         for path in candidates:
             try:
@@ -58,13 +73,21 @@ class GenericDecoderAdapter(ModelAdapter):
         )
 
     def layers(self) -> list[nn.Module]:
-        layers = self._first_path(LAYER_PATHS, "decoder layers")
+        layers = self._first_path((self.layers_path,) if self.layers_path else LAYER_PATHS, "decoder layers")
         if not isinstance(layers, (nn.ModuleList, list, tuple)):
             raise TypeError(f"Located layers object has unsupported type: {type(layers)!r}")
         return list(layers)
 
     def final_norm(self) -> nn.Module:
-        norm = self._first_path(NORM_PATHS, "final normalization")
+        if self.norm_path == "identity":
+            return nn.Identity()
+        try:
+            norm = self._first_path((self.norm_path,) if self.norm_path else NORM_PATHS,
+                                    "final normalization")
+        except ValueError:
+            if getattr(self.model.config, "model_type", None) == "opt":
+                return nn.Identity()
+            raise
         if not isinstance(norm, nn.Module):
             raise TypeError("Final normalization is not a torch module")
         return norm
@@ -82,6 +105,30 @@ class GenericDecoderAdapter(ModelAdapter):
         if embeddings is None:
             raise ValueError("Could not locate the model output embeddings/lm_head")
         return embeddings
+
+    def project(self, hidden):
+        """Replay the architecture's post-block readout, including documented logit transforms."""
+        from ..probes.logit_lens import module_device
+        norm = self.final_norm()
+        device = module_device(norm) if any(True for _ in norm.parameters()) else hidden.device
+        hidden = norm(hidden.to(device))
+        decoder = getattr(getattr(self.model, "model", None), "decoder", None)
+        projection = getattr(decoder, "project_out", None)
+        if projection is not None:
+            hidden = projection(hidden.to(module_device(projection)))
+        head = self.output_embeddings()
+        logits = head(hidden.to(module_device(head)))
+        config = getattr(self.model, "config", None)
+        cap = getattr(config, "final_logit_softcapping", None)
+        if cap is not None:
+            logits = (logits / cap).tanh() * cap
+        divisor = getattr(config, "logits_scaling", None)
+        if divisor is not None:
+            logits = logits / divisor
+        scale = getattr(config, "logit_scale", None)
+        if scale is not None:
+            logits = logits * scale
+        return logits
 
     def router_modules(self) -> Iterable[RouterModule]:
         layer_modules = self.layers()

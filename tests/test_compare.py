@@ -63,3 +63,25 @@ def test_compare_rejects_different_tokenizers() -> None:
     with pytest.raises(ValueError, match="tokenizer_hash"):
         compare_analyses(left, right)
 
+
+
+@pytest.mark.parametrize('change', ['extra_sample', 'different_prompt', 'different_target',
+                                  'extra_position', 'duplicate_sample'])
+def test_comparison_refuses_unpaired_inputs(change):
+    import copy
+    left = _analysis('a', 1)
+    right = copy.deepcopy(left)
+    if change == 'extra_sample':
+        right['samples'].append({**right['samples'][0], 'id': 'extra'})
+    elif change == 'duplicate_sample':
+        right['samples'].append(right['samples'][0])
+    elif change == 'different_prompt':
+        right['samples'][0]['prompt'] = 'other'
+    elif change == 'different_target':
+        right['samples'][0]['target'] = 'other'
+    else:
+        extra = copy.deepcopy(right['samples'][0]['layer_predictions'][0])
+        extra['position'] = 99
+        right['samples'][0]['layer_predictions'].append(extra)
+    with pytest.raises(ValueError):
+        compare_analyses(left, right)

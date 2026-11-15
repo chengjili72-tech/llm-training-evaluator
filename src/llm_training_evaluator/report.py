@@ -7,6 +7,8 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any
 
+from .research_report import evaluation_panel, target_panel, comparison_panel, representation_panel
+
 
 STYLE = """
 :root {
@@ -113,6 +115,7 @@ main { padding: 5px 0 60px; }
 .sample-card { margin: 16px 0; overflow: hidden; scroll-margin-top: 72px; }
 .sample-head { padding: 18px 20px; display: flex; justify-content: space-between; gap: 18px;
   border-bottom: 1px solid var(--border); background: linear-gradient(115deg, var(--surface), var(--surface-2)); }
+.sample-head .status-badge { align-self: flex-start; }
 .sample-head h2 { margin: 0 0 3px; font-size: 18px; }
 .sample-index { color: var(--primary); font-size: 11px; font-weight: 800; letter-spacing: .08em; }
 .prompt { margin: 0; max-width: 980px; color: var(--text); white-space: pre-wrap; word-break: break-word; }
@@ -352,12 +355,12 @@ def _analysis_summary(payload: dict[str, Any]) -> str:
         "<div class='metrics'>"
         + _metric(
             "Logit Lens 最大误差",
-            _num(max_error, 3),
-            "最终层与模型原生 logits 的一致性",
+            _num(max_error, 3) if predictions else "未启用",
+            "最终层与模型原生 logits 的一致性" if predictions else "原生目标评分不运行逐层探针",
             _tone_lower(max_error, 1e-5, 2e-3),
         )
-        + _metric("平均 Top-1 概率", _num(_mean(top1_probabilities), 6), "所有样例与层的平均置信度")
-        + _metric("平均分布熵", _num(_mean(entropies), 4), "越低通常表示分布越集中")
+        + _metric("平均 Top-1 概率", _num(_mean(top1_probabilities) if top1_probabilities else None, 6), "所有样例与层的平均置信度")
+        + _metric("平均分布熵", _num(_mean(entropies) if entropies else None, 4), "越低通常表示分布越集中")
         + _metric(
             "层间 Top-1 切换",
             str(switches),
@@ -385,12 +388,13 @@ def _analysis_table(predictions: list[dict[str, Any]]) -> str:
             f"<td><span class='top-token'>{_esc(top.get('text') or top.get('token'))}</span></td>"
             f"<td>{_bar(float(top['probability']), max_probability)}</td>"
             f"<td>{_num(item.get('entropy'),4)}</td>"
+            f"<td>{_num(item.get('adjacent_js_divergence'),5)}</td>"
             f"<td>{_tokens(item['top_tokens'])}</td>"
             "</tr>"
         )
     return (
         "<div class='table-wrap'><table><thead><tr><th>层</th><th>位置</th><th>Top-1</th>"
-        "<th>概率（相对刻度）</th><th>熵</th><th>完整 Top-K</th></tr></thead><tbody>"
+        "<th>概率（相对刻度）</th><th>熵 · nats</th><th>相邻层 JS · nats</th><th>完整 Top-K</th></tr></thead><tbody>"
         + "".join(rows)
         + "</tbody></table></div>"
     )
@@ -472,17 +476,42 @@ def _moe_analysis(sample: dict[str, Any]) -> str:
     )
 
 
+def _position_charts(predictions: list[dict[str, Any]], metric: str, color: str) -> str:
+    by_position: dict[int, list[dict[str, Any]]] = {}
+    for item in predictions:
+        by_position.setdefault(item["position"], []).append(item)
+    charts = []
+    for position, rows in by_position.items():
+        values = [r["top_tokens"][0]["probability"] if metric == "probability" else r[metric]
+                  for r in rows]
+        charts.append(f"<details open><summary>Token position {position}</summary>" +
+                      _sparkline(values, [f"L{r['layer']}" for r in rows], color, minimum=0.0)
+                      + "</details>")
+    return "".join(charts)
+
+
+def _depth_table(sample: dict[str, Any]) -> str:
+    rows = sample.get("prediction_depth", [])
+    if not rows:
+        return ""
+    return ("<details class='block'><summary>预测稳定深度（从 0 开始的层编号）</summary>"
+            "<p>从该层起 Top-1 一直等于最终 Top-1；仅为未训练 Logit Lens 的描述性结果。</p>"
+            "<div class='table-wrap'><table><thead><tr><th>位置</th><th>稳定起始层</th>"
+            "<th>最终 Top-1 ID</th></tr></thead><tbody>" + "".join(
+                f"<tr><td>{r['position']}</td><td>{r['stable_from_layer']}</td>"
+                f"<td>{r['final_top1_id']}</td></tr>" for r in rows)
+            + "</tbody></table></div></details>")
+
+
 def _analysis_sample(sample: dict[str, Any], index: int) -> str:
     predictions = sorted(
         sample.get("layer_predictions", []), key=lambda item: (item["position"], item["layer"])
     )
-    labels = [f"L{item['layer']}" for item in predictions]
-    probabilities = [float(item["top_tokens"][0]["probability"]) for item in predictions if item.get("top_tokens")]
-    entropy = [float(item.get("entropy", 0.0)) for item in predictions]
     tags = "".join(f"<span class='badge neutral'>{_esc(tag)}</span>" for tag in sample.get("tags", []))
     validation = sample.get("final_logit_lens_validation", {})
     max_error = float(validation.get("max_abs", 0.0))
-    status = "校验通过" if max_error <= 2e-3 else "校验异常"
+    status = ("未启用逐层探针" if validation.get("status") == "disabled_native_only" else
+              "校验通过" if validation.get("passed", max_error <= 2e-3) else "校验异常")
     status_tone = _tone_lower(max_error, 1e-5, 2e-3)
     filter_text = " ".join(
         [str(sample.get("id", "")), str(sample.get("prompt", "")), *sample.get("tags", [])]
@@ -495,6 +524,12 @@ def _analysis_sample(sample: dict[str, Any], index: int) -> str:
             + "".join(f"<li>{_esc(item)}</li>" for item in warnings)
             + "</ul></details>"
         )
+    if not predictions:
+        return (f"<article class='sample-card' id='sample-{index}' data-filter='{_esc(filter_text)}'>"
+                f"<div class='sample-head'><h2>{_esc(sample.get('id'))}</h2>"
+                "<span class='badge neutral'>未启用逐层探针</span></div>"
+                f"<div class='sample-body'><p class='prompt'>{_esc(sample.get('prompt'))}</p>"
+                + target_panel(sample) + warning_html + "</div></article>")
     return (
         f"<article class='sample-card' id='sample-{index}' data-filter='{_esc(filter_text)}'>"
         "<div class='sample-head'><div>"
@@ -504,13 +539,15 @@ def _analysis_sample(sample: dict[str, Any], index: int) -> str:
         "<div class='sample-body'><div class='charts'>"
         "<div class='chart-card'><div class='chart-title'>逐层 Top-1 概率</div>"
         "<div class='chart-note'>观察模型置信度如何随层数演化；悬停节点查看精确值。</div>"
-        + _sparkline(probabilities, labels[: len(probabilities)], "#3157d5", minimum=0.0)
+        + _position_charts(predictions, "probability", "#3157d5")
         + "</div><div class='chart-card'><div class='chart-title'>逐层分布熵</div>"
         "<div class='chart-note'>分布越集中，熵通常越低；重点关注突变层。</div>"
-        + _sparkline(entropy, labels[: len(entropy)], "#0f8b8d")
+        + _position_charts(predictions, "entropy", "#0f8b8d")
         + "</div></div>"
         "<div class='section-title'><h2>逐层 Token 轨迹</h2><p>Top-K 完整概率按层展开</p></div>"
         + _analysis_table(predictions)
+        + target_panel(sample)
+        + _depth_table(sample)
         + _moe_analysis(sample)
         + _similarities(sample)
         + warning_html
@@ -520,9 +557,11 @@ def _analysis_sample(sample: dict[str, Any], index: int) -> str:
 
 def _comparison_summary(payload: dict[str, Any]) -> str:
     summary = payload.get("summary", {})
-    agreement = float(summary.get("top1_agreement", 0.0))
-    overlap = float(summary.get("mean_top_k_overlap", 0.0))
-    l1 = float(summary.get("mean_top_k_probability_l1", 0.0))
+    if summary.get("top1_agreement") is None:
+        return "<p class='panel'>逐层探针未启用；以下仅比较原生目标续写指标。</p>"
+    agreement = float(summary.get("top1_agreement") or 0.0)
+    overlap = float(summary.get("mean_top_k_overlap") or 0.0)
+    l1 = float(summary.get("mean_top_k_probability_l1") or 0.0)
     expert_tv = summary.get("mean_expert_load_total_variation")
     return (
         "<div class='metrics'>"
@@ -667,11 +706,14 @@ def _page(payload: dict[str, Any], is_comparison: bool) -> str:
     )
     if is_comparison:
         summary = payload.get("summary", {})
-        overall = float(summary.get("top1_agreement", 0.0))
-        status = "整体稳定" if overall >= .95 else "存在明显漂移"
+        overall = float(summary.get("top1_agreement") or 0.0)
+        status = "Top-1 一致率 ≥95%" if overall >= .95 else "Top-1 一致率 <95%"
         tone = _tone_higher(overall, .95, .8)
-        overview = _comparison_summary(payload) + _hotspots(payload)
+        overview = (_comparison_summary(payload) + comparison_panel(payload)
+                    + representation_panel(payload) + _hotspots(payload))
         sections = "".join(_comparison_sample(sample, index) for index, sample in enumerate(samples, 1))
+        if summary.get("top1_agreement") is None:
+            status = "原生目标似然对比"
         model_line = f"{metadata.get('model_a','Model A')} ↔ {metadata.get('model_b','Model B')}"
     else:
         errors = [
@@ -679,9 +721,12 @@ def _page(payload: dict[str, Any], is_comparison: bool) -> str:
             for sample in samples
         ]
         maximum_error = max(errors, default=0.0)
-        status = "Logit Lens 校验通过" if maximum_error <= 2e-3 else "Logit Lens 校验异常"
+        validations = [s.get("final_logit_lens_validation", {}) for s in samples]
+        disabled = all(v.get("status") == "disabled_native_only" for v in validations)
+        passed = all(v.get("passed", v.get("max_abs", 0.0) <= 2e-3) for v in validations)
+        status = "原生目标评分模式" if disabled else "Logit Lens 校验通过" if passed else "Logit Lens 校验异常"
         tone = _tone_lower(maximum_error, 1e-5, 2e-3)
-        overview = _analysis_summary(payload)
+        overview = evaluation_panel(payload) + _analysis_summary(payload)
         sections = "".join(_analysis_sample(sample, index) for index, sample in enumerate(samples, 1))
         model_line = str(metadata.get("model", "Unknown model"))
     empty = "<div class='empty'>没有可展示的样例。</div>" if not samples else ""
@@ -705,6 +750,12 @@ def _page(payload: dict[str, Any], is_comparison: bool) -> str:
         + f"<div class='section-title'><h2>样例明细</h2><p>共 {len(samples)} 个样例</p></div>"
         + sections
         + empty
+        + "<section class='panel'><h3>方法与解释边界</h3><p>NLL/PPL：自回归条件似然；"
+        "ECE：Guo et al., ICML 2017；配对 Bootstrap：Koehn, EMNLP 2004。"
+        "逐层分析参考 Belrose et al., Tuned Lens，但此工具使用未训练的 Logit Lens，"
+        "没有训练 Tuned Lens。预测稳定深度和相邻层 JS 是描述性探针，不代表可安全提前退出。</p>"
+        "<p>概率 L1 只覆盖 Top-K 联集，不能解释为全词表距离。"
+        "MoE gate Top-K 可能不等于经容量限制、分组选择或偏置修正后的最终 dispatch。</p></section>"
         + _metadata(payload)
         + "</main><footer class='shell'>由 LLM Training Evaluator 生成 · 自包含离线报告</footer>"
         f"<script>{SCRIPT}</script></body></html>"
