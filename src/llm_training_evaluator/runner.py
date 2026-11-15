@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import platform
+from importlib.metadata import version
 import warnings
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -17,6 +19,7 @@ from .config import AnalysisConfig, ModelConfig
 from .probes import LogitLensProbe, MoeRoutingProbe, TokenSimilarityProbe
 from .probes.logit_lens import module_device
 from .runtime import resolve_runtime
+from .scoring import score_sample, aggregate_scoring
 from .schemas import Sample, to_dict
 
 
@@ -40,10 +43,24 @@ class Evaluator:
         self.runtime_plan = resolve_runtime(model_config)
 
     def run(self, samples: list[Sample]) -> dict[str, Any]:
+        if not samples or len({s.id for s in samples}) != len(samples):
+            raise ValueError("Samples must be nonempty with unique IDs")
+        if self.runtime_plan.backend in {"cuda", "npu"}:
+            backend = getattr(torch, self.runtime_plan.backend)
+            index = int(self.runtime_plan.execution_device.split(":", 1)[1])
+            backend.set_device(index)
+            backend.reset_peak_memory_stats(index)
         tokenizer, model = self._load()
-        adapter = GenericDecoderAdapter(model)
-        layers = adapter.layers()
-        router_modules = list(adapter.router_modules()) if self.analysis_config.capture_moe else []
+        adapter = GenericDecoderAdapter(model, self.model_config.layers_path,
+                                        self.model_config.norm_path)
+        layers = [] if self.analysis_config.native_only else adapter.layers()
+        context_limit = next((getattr(model.config, key) for key in
+                              ("max_position_embeddings", "n_positions", "max_seq_len")
+                              if isinstance(getattr(model.config, key, None), int)
+                              and getattr(model.config, key) > 1), self.analysis_config.max_length)
+        scoring_window = min(context_limit, self.analysis_config.max_length)
+        scoring_stride = min(self.analysis_config.scoring_stride, scoring_window - 1)
+        router_modules = list(adapter.router_modules()) if self.analysis_config.capture_moe and layers else []
         moe_top_k = self._moe_top_k(model)
         similarity_probe = TokenSimilarityProbe(
             adapter, tokenizer, chunk_size=self.analysis_config.similarity_chunk_size
@@ -52,18 +69,25 @@ class Evaluator:
         sample_results = []
         for sample in samples:
             encoded = tokenizer(sample.prompt, return_tensors="pt")
+            if encoded["input_ids"].shape[-1] == 0:
+                if tokenizer.bos_token_id is None:
+                    raise ValueError("Empty prompt requires a tokenizer BOS token")
+                encoded = {"input_ids": torch.tensor([[tokenizer.bos_token_id]])}
+            if not self.analysis_config.native_only and encoded["input_ids"].shape[-1] > context_limit:
+                raise ValueError("Prompt exceeds the model context; use --native-only for windowed scoring")
             input_device = module_device(adapter.input_embeddings())
             if input_device.type == "meta":
                 input_device = torch.device(self.runtime_plan.execution_device)
             input_ids = encoded["input_ids"].to(input_device)
             attention_mask = encoded.get("attention_mask", torch.ones_like(input_ids)).to(input_device)
             if input_ids.shape[0] != 1:
-                raise ValueError("V1 evaluates one sample per forward pass")
+                raise ValueError("The evaluator processes one sample per forward pass")
 
             predictions: list[Any] = []
             moe_results: list[Any] = []
             warnings: list[str] = []
-            logit_probe = LogitLensProbe(adapter, tokenizer, self.analysis_config)
+            logit_probe = (LogitLensProbe(adapter, tokenizer, self.analysis_config)
+                           if layers else None)
             moe_probe = MoeRoutingProbe(tokenizer, self.analysis_config, top_k=moe_top_k)
 
             with ExitStack() as stack:
@@ -95,19 +119,23 @@ class Evaluator:
                     )
                     stack.callback(handle.remove)
 
-                with torch.inference_mode():
-                    output = model(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        use_cache=False,
-                        return_dict=True,
-                    )
+                if layers:
+                    with torch.inference_mode():
+                        output = model(input_ids=input_ids, attention_mask=attention_mask,
+                                       use_cache=False, return_dict=True)
 
-            native_logits = output.logits
-            validation = logit_probe.validate_final_logits(native_logits)
-            similarities = similarity_probe.analyze(
-                input_ids, top_k=self.analysis_config.similarity_top_k
-            )
+            validation = (logit_probe.validate_final_logits(output.logits) if layers else
+                          {"passed": None, "status": "disabled_native_only"})
+            similarities = (similarity_probe.analyze(
+                input_ids, top_k=self.analysis_config.similarity_top_k) if layers else [])
+            # Hooks have been removed; continuation passes must not contaminate trajectories.
+            target_metrics = (score_sample(model, tokenizer, sample, input_device,
+                                           max_length=scoring_window, stride=scoring_stride,
+                                           bins=self.analysis_config.calibration_bins)
+                              if self.analysis_config.score_targets else None)
+            if target_metrics and target_metrics.get("unknown_target_tokens", 0):
+                warnings.append("Target contains tokenizer UNK tokens; likelihood does not fully "
+                                "represent the supplied text. Check tokenizer coverage.")
             tokens = [
                 {
                     "position": position,
@@ -132,21 +160,37 @@ class Evaluator:
                     "moe_routing": [to_dict(item) for item in moe_results],
                     "final_logit_lens_validation": validation,
                     "warnings": warnings,
+                    "target_metrics": target_metrics,
+                    "prediction_depth": self._prediction_depth(predictions),
                 }
             )
 
         config_dict = model.config.to_dict()
         vocabulary = tokenizer.get_vocab()
         metadata = {
-            "schema_version": "1.0",
+            "schema_version": "1.1",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "model": self.model_config.path,
             "revision": self.model_config.revision,
+            "model_load_config": to_dict(self.model_config),
+            "parameter_dtypes": sorted({str(p.dtype) for p in model.parameters()}),
+            "attention_implementation": getattr(model.config, "_attn_implementation", None),
             "model_type": config_dict.get("model_type"),
             "num_layers": len(layers),
             "num_parameters": sum(parameter.numel() for parameter in model.parameters()),
             "model_config_hash": _stable_hash(config_dict),
             "tokenizer_hash": _stable_hash(vocabulary),
+            "tokenizer_config_hash": _stable_hash({"vocab": vocabulary,
+                "special_tokens": tokenizer.special_tokens_map,
+                "backend": tokenizer.backend_tokenizer.to_str() if tokenizer.is_fast else
+                           tokenizer.init_kwargs}),
+            "samples_hash": _stable_hash([to_dict(s) for s in samples]),
+            "versions": {"python": platform.python_version(), "torch": torch.__version__,
+                         "transformers": version("transformers")},
+            "resolved_revision": getattr(model.config, "_commit_hash", None),
+            "scoring_protocol": {"context_window": scoring_window, "stride": scoring_stride,
+                                 "calibration_bins": self.analysis_config.calibration_bins,
+                                 "rank_ties": "optimistic"},
             "analysis_config": to_dict(self.analysis_config),
             "router_modules": [
                 {"layer": router.layer, "name": router.name} for router in router_modules
@@ -157,7 +201,9 @@ class Evaluator:
             },
             "accelerator_memory": self._accelerator_memory(),
         }
-        return {"metadata": metadata, "samples": sample_results}
+        return {"metadata": metadata, "samples": sample_results,
+                "evaluation": aggregate_scoring(sample_results,
+                                                self.analysis_config.calibration_bins)}
 
     def _load(self) -> tuple[Any, Any]:
         common: dict[str, Any] = {
@@ -169,6 +215,8 @@ class Evaluator:
             tokenizer.pad_token = tokenizer.eos_token
 
         model_kwargs: dict[str, Any] = dict(common)
+        if self.model_config.attn_implementation:
+            model_kwargs["attn_implementation"] = self.model_config.attn_implementation
         model_kwargs["low_cpu_mem_usage"] = True
         if self.model_config.dtype != "auto":
             model_kwargs["torch_dtype"] = DTYPES[self.model_config.dtype]
@@ -207,6 +255,20 @@ class Evaluator:
             model = model.to(plan.execution_device)
         model.eval()
         return tokenizer, model
+
+    @staticmethod
+    def _prediction_depth(predictions: list[Any]) -> list[dict[str, int]]:
+        by_position: dict[int, list[Any]] = {}
+        for row in predictions:
+            by_position.setdefault(row.position, []).append(row)
+        result = []
+        for position, rows in by_position.items():
+            final = rows[-1].top_tokens[0].token_id
+            last_change = max((r.layer for r in rows if r.top_tokens[0].token_id != final),
+                              default=-1)
+            result.append({"position": position, "stable_from_layer": last_change + 1,
+                           "final_top1_id": final})
+        return result
 
     def _accelerator_memory(self) -> dict[str, int] | None:
         plan = self.runtime_plan

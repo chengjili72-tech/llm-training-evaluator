@@ -1,0 +1,4 @@
+{"id":"capital_en","prompt":"The capital of France is","target":" Paris.","tags":["en","knowledge"]}
+{"id":"math_en","prompt":"One plus one equals","target":" two.","tags":["en","math"]}
+{"id":"code_en","prompt":"In Python, a function is defined using the keyword","target":" def.","tags":["en","code"]}
+{"id":"capital_zh","prompt":"中国的首都是","target":"北京。","tags":["zh","knowledge"]}

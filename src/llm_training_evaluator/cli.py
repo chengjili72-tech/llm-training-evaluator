@@ -8,6 +8,7 @@ import torch
 
 from .compare import compare_analyses
 from .config import AnalysisConfig, ModelConfig
+from .export import write_csv_tables
 from .io import load_samples, read_json, write_json
 from .report import write_html_report
 from .runner import Evaluator
@@ -31,6 +32,9 @@ def _analysis_config(args: argparse.Namespace) -> AnalysisConfig:
         moe_top_k=args.moe_top_k,
         moe_detail=args.moe_detail,
         include_hidden_states=args.include_hidden_states,
+        native_only=args.native_only, score_targets=not args.no_target_scoring,
+        max_length=args.max_length, scoring_stride=args.scoring_stride,
+        calibration_bins=args.calibration_bins, projection_chunk_size=args.projection_chunk_size,
     )
 
 
@@ -46,6 +50,8 @@ def _model_config(path: str, args: argparse.Namespace) -> ModelConfig:
         cpu_memory=args.cpu_memory,
         offload_folder=args.offload_dir,
         trust_remote_code=args.trust_remote_code,
+        attn_implementation=args.attn_implementation,
+        layers_path=args.layers_path, norm_path=args.norm_path,
     )
 
 
@@ -85,6 +91,16 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--moe-top-k", type=int)
     parser.add_argument("--moe-detail", action="store_true")
     parser.add_argument("--include-hidden-states", action="store_true")
+    parser.add_argument("--attn-implementation", choices=("eager", "sdpa", "flash_attention_2"))
+    parser.add_argument("--layers-path", help="Explicit dotted decoder block path")
+    parser.add_argument("--norm-path", help="Explicit final norm path, or identity")
+    parser.add_argument("--native-only", action="store_true",
+                        help="Score targets without architecture-specific interpretability probes")
+    parser.add_argument("--no-target-scoring", action="store_true")
+    parser.add_argument("--max-length", type=int, default=2048)
+    parser.add_argument("--scoring-stride", type=int, default=512)
+    parser.add_argument("--calibration-bins", type=int, default=15)
+    parser.add_argument("--projection-chunk-size", type=int, default=32)
 
 
 def _release_accelerator_memory() -> None:
@@ -145,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
         result = Evaluator(_model_config(args.model, args), _analysis_config(args)).run(samples)
         _print_runtime(result)
         write_json(args.output, result)
+        write_csv_tables(result, args.output)
         html_path = args.html or str(Path(args.output).with_suffix(".html"))
         write_html_report(result, html_path)
         print(f"Analysis JSON: {args.output}")
@@ -158,12 +175,17 @@ def main(argv: list[str] | None = None) -> int:
         model_a = Evaluator(_model_config(args.model_a, args), config).run(samples)
         _print_runtime(model_a)
         write_json(output_dir / "model_a.json", model_a)
+        write_csv_tables(model_a, output_dir / "model_a.json")
+        write_html_report(model_a, output_dir / "model_a.html")
         _release_accelerator_memory()
         model_b = Evaluator(_model_config(args.model_b, args), config).run(samples)
         _print_runtime(model_b)
         write_json(output_dir / "model_b.json", model_b)
+        write_csv_tables(model_b, output_dir / "model_b.json")
+        write_html_report(model_b, output_dir / "model_b.html")
         comparison = compare_analyses(model_a, model_b)
         write_json(output_dir / "comparison.json", comparison)
+        write_csv_tables(comparison, output_dir / "comparison.json")
         write_html_report(comparison, output_dir / "comparison.html")
         print(f"Comparison results: {output_dir}")
         return 0
@@ -172,6 +194,7 @@ def main(argv: list[str] | None = None) -> int:
     model_b = read_json(args.analysis_b)
     comparison = compare_analyses(model_a, model_b)
     write_json(args.output, comparison)
+    write_csv_tables(comparison, args.output)
     html_path = args.html or str(Path(args.output).with_suffix(".html"))
     write_html_report(comparison, html_path)
     print(f"Comparison JSON: {args.output}")

@@ -20,6 +20,9 @@ class ModelConfig:
     cpu_memory: str | None = None
     offload_folder: str = "~/.cache/llm-training-evaluator/offload"
     trust_remote_code: bool = False
+    attn_implementation: str | None = None
+    layers_path: str | None = None
+    norm_path: str | None = None
 
 
 @dataclass(slots=True)
@@ -33,8 +36,20 @@ class AnalysisConfig:
     moe_detail: bool = False
     similarity_chunk_size: int = 16_384
     include_hidden_states: bool = False
+    native_only: bool = False
+    score_targets: bool = True
+    max_length: int = 2048
+    scoring_stride: int = 512
+    calibration_bins: int = 15
+    projection_chunk_size: int = 32
 
     def validate(self) -> None:
+        if self.max_length < 2 or not 1 <= self.scoring_stride < self.max_length:
+            raise ValueError("Require max_length >= 2 and 1 <= scoring_stride < max_length")
+        if self.calibration_bins < 1 or self.projection_chunk_size < 1:
+            raise ValueError("calibration_bins and projection_chunk_size must be positive")
+        if self.similarity_chunk_size < 1:
+            raise ValueError("similarity_chunk_size must be positive")
         if self.top_k < 1:
             raise ValueError("top_k must be at least 1")
         if self.similarity_top_k < 1:

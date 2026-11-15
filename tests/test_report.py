@@ -167,3 +167,14 @@ def test_comparison_report_surfaces_hotspots_and_drift(tmp_path) -> None:
     assert "变化" in report
     assert "chart-svg" in report
     assert "https://" not in report
+
+
+def test_native_only_report_does_not_claim_lens_validation(tmp_path):
+    payload = {'metadata': {'model': 'native'}, 'samples': [
+        {'id': 's', 'prompt': '<script>alert(1)</script>', 'layer_predictions': [],
+         'final_logit_lens_validation': {'status': 'disabled_native_only', 'passed': None}}]}
+    text = write_html_report(payload, tmp_path / 'native.html').read_text()
+    assert '原生目标评分模式' in text
+    assert '未启用逐层探针' in text
+    assert 'Logit Lens 校验通过' not in text
+    assert '<script>alert(1)</script>' not in text

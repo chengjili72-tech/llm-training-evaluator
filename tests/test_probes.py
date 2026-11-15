@@ -83,3 +83,13 @@ def test_moe_probe_reports_selected_experts_and_load() -> None:
     assert result is not None
     assert result.expert_load == {0: 1, 2: 1}
     assert result.selected_routes[0]["experts"][0]["expert_id"] == 2
+
+
+def test_position_aliases_are_deduplicated_and_left_padding_is_respected():
+    from llm_training_evaluator.probes.logit_lens import position_indices
+    assert position_indices(torch.tensor([[1]]), torch.tensor([[1]]), 'selected', [0, -1]) == [0]
+    ids = torch.tensor([[0, 0, 1, 2]])
+    mask = torch.tensor([[0, 0, 1, 1]])
+    assert position_indices(ids, mask, 'last', []) == [3]
+    assert position_indices(ids, mask, 'all', []) == [2, 3]
+    assert position_indices(ids, mask, 'selected', [0, -1]) == [2, 3]

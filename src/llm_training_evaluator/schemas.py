@@ -31,6 +31,7 @@ class LayerPrediction:
     entropy: float
     top_tokens: list[TokenScore]
     hidden_state: list[float] | None = None
+    adjacent_js_divergence: float | None = None
 
 
 @dataclass(slots=True)
